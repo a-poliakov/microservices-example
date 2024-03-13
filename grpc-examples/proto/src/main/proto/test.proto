@@ -1,0 +1,19 @@
+syntax = "proto2";
+
+option java_package = "ru.otus.grpc.proto";
+
+package test;
+
+message Foo {
+  extensions 100 to 199;
+}
+
+extend Foo {
+  optional int32 bar = 123;
+}
+
+message Baz {
+  extend Foo {
+    optional Baz foo_ext = 124;
+  }
+}

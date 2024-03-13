@@ -1,0 +1,128 @@
+/*
+ * Copyright 2018 Jan Dittberner
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+buildscript {
+    repositories {
+        mavenCentral()
+        jcenter()
+        maven {
+            url 'https://repo.spring.io/libs-milestone'
+        }
+    }
+    dependencies {
+        classpath('org.springframework.boot:spring-boot-gradle-plugin:2.0.2.RELEASE')
+        classpath('com.bmuschko:gradle-docker-plugin:3.2.5')
+    }
+}
+
+apply plugin: 'java'
+apply plugin: 'eclipse'
+apply plugin: 'idea'
+apply plugin: 'org.springframework.boot'
+apply plugin: 'io.spring.dependency-management'
+apply plugin: 'com.bmuschko.docker-remote-api'
+
+bootJar {
+    baseName = 'spring-boot-vault-demo'
+    version = '0.1.0'
+}
+
+repositories {
+    mavenCentral()
+    maven {
+        url 'https://repo.spring.io/libs-milestone'
+    }
+}
+
+sourceCompatibility = 1.8
+targetCompatibility = 1.8
+
+dependencyManagement {
+    imports {
+        mavenBom 'org.springframework.cloud:spring-cloud-vault-dependencies:2.0.0.RC1'
+    }
+}
+
+dependencies {
+    compile("org.springframework.boot:spring-boot-starter-web")
+    compile("org.springframework.boot:spring-boot-starter-actuator")
+    compile("org.springframework.boot:spring-boot-starter-data-jpa")
+    compile("org.springframework.boot:spring-boot-starter-data-rest")
+    compile("org.springframework.cloud:spring-cloud-starter-vault-config")
+    compile("org.springframework.cloud:spring-cloud-vault-config-databases")
+    compile("commons-io:commons-io:2.6")
+    runtime("org.postgresql:postgresql")
+    testCompile("org.springframework.boot:spring-boot-starter-test")
+
+    annotationProcessor("org.projectlombok:lombok")
+    implementation("org.projectlombok:lombok")
+}
+
+task buildVaultCertificate(type: Exec) {
+    commandLine "openssl", "req", "-new", "-x509", "-config", project.file("vault/openssl.cnf").path, "-out", "vault/config/ssl/vault.crt.pem"
+    inputs.file project.file("vault/openssl.cnf")
+    outputs.file project.file("vault/config/ssl/vault.crt.pem")
+    outputs.file project.file("vault/config/ssl/private/vault.key.pem")
+}
+
+task buildTruststore(type: Exec, dependsOn: [processResources, buildVaultCertificate]) {
+    commandLine "keytool", "-importcert", "-noprompt", \
+        "-keystore", project.file("build/resources/main/vault-truststore.jks").path, "-storepass", "s3cr3t", \
+        "-alias", "vault", "-file", project.file("vault/config/ssl/vault.crt.pem").path
+    inputs.file project.file("vault/config/ssl/vault.crt.pem")
+    outputs.file project.file("build/resources/main/vault-truststore.jks")
+}
+
+import com.bmuschko.gradle.docker.tasks.image.Dockerfile
+
+task createWebDockerfile(type: Dockerfile) {
+    destFile = project.file('build/docker/web/Dockerfile')
+    from 'openjdk:8-jre-alpine'
+    maintainer "Jan Dittberner <jan.dittberner@t-systems.com>"
+    runCommand 'apk --update --no-cache add curl'
+    copyFile bootJar.archiveName, '/app/spring-boot-vault-demo.jar'
+    copyFile 'bootstrap.yml', '/app/bootstrap.yml'
+    entryPoint 'java'
+    workingDir '/app'
+    defaultCommand '-jar', '/app/spring-boot-vault-demo.jar'
+    exposePort 8080
+    instruction 'HEALTHCHECK CMD curl -f http://localhost:8080/actuator/health || exit 1'
+}
+
+task createVaultDockerfile(type: Dockerfile) {
+    destFile = project.file('build/docker/vault/Dockerfile')
+    from 'vault:0.10.1'
+    maintainer "Jan Dittberner <jan.dittberner@t-systems.com>"
+    copyFile 'config', '/vault/config'
+    runCommand  'chown -R vault:vault /vault/config'
+}
+
+task syncArchive(type: Sync) {
+    dependsOn assemble
+    from bootJar.archivePath
+    from project.file('bootstrap.yml')
+    into createWebDockerfile.destFile.parentFile
+}
+
+task syncVaultConfig(type: Sync) {
+    dependsOn buildVaultCertificate
+    from project.file('vault/config')
+    into project.file(createVaultDockerfile.destFile.parentFile.path + "/config")
+}
+
+bootJar.dependsOn buildTruststore
+createWebDockerfile.dependsOn syncArchive
+createVaultDockerfile.dependsOn syncVaultConfig
+build.dependsOn createWebDockerfile, createVaultDockerfile

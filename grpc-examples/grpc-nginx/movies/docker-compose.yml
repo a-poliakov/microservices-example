@@ -1,0 +1,9 @@
+movie1:
+  build: .
+  ports:
+    - "6565:6565"
+
+movie2:
+  build: .
+  ports:
+    - "6566:6565"
